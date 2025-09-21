@@ -4,13 +4,32 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from typing import Optional
 import os
+import uvicorn # Import uvicorn
+import threading
+import asyncio
 
-from openai import OpenAI
+import google.generativeai as genai
+# Used to securely store your API key
+from google.colab import userdata
 
 
-NVIDIA_API_KEY = "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"
-BASE_URL = "https://integrate.api.nvidia.com/v1"
-MODEL = "nvidia/llama-3.3-nemotron-super-49b-v1.5"
+# Load environment variables
+load_dotenv()
+
+# Configure Gemini API
+try:
+    # Access the API key from Google Colab secrets
+    GOOGLE_API_KEY = "AIzaSyCO3ZAadsBiMgYeP0DOfDYgy9IoSUDH9WQ";
+    if not GOOGLE_API_KEY:
+        raise ValueError("GOOGLE_API_KEY not found in Colab secrets.")
+    genai.configure(api_key=GOOGLE_API_KEY)
+except Exception as e:
+    print(f"Error configuring Gemini API: {e}")
+    # Handle the error appropriately, e.g., exit or raise an exception
+    exit()
+
+
+MODEL = "gemini-2.0-flash" # Use an appropriate Gemini model
 
 # FastAPI app
 app = FastAPI(title="Notes + AI Summarizer API (Streaming)")
@@ -22,33 +41,39 @@ class SummarizeRequest(BaseModel):
 
 
 def get_client():
-    return OpenAI(base_url=BASE_URL, api_key=NVIDIA_API_KEY)
+    # With the Gemini API, the client is not explicitly created like with OpenAI.
+    # The genai.configure(api_key=...) handles the setup.
+    # We will return the generative model directly.
+    return genai.GenerativeModel(MODEL)
 
 
 async def stream_summary(text: str, max_tokens: int = 1024) -> str:
     """
-    Collects streamed summary from NVIDIA LLM and returns full text.
+    Collects streamed summary from Gemini LLM and returns full text.
     """
-    client = get_client()
+    model = get_client()
 
-    completion = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "You are a helpful summarizer."},
-            {"role": "user", "content": f"Summarize this:\n\n{text[:1024] if len(text) > 1024 else text}"},
+    # Truncate text if longer than 1024 characters
+    truncated_text = text[:1024] if len(text) > 1024 else text
+
+    completion = model.generate_content(
+        contents=[
+            {"role": "user", "parts": [{"text": f"Summarize this:\n\n{truncated_text}"}]},
         ],
-        temperature=0.6,
-        top_p=0.95,
-        max_tokens=max_tokens,
-        frequency_penalty=0,
-        presence_penalty=0,
+        generation_config={
+            "temperature": 0.6,
+            "top_p": 0.95,
+            "max_output_tokens": max_tokens, # Use max_output_tokens for Gemini
+        },
         stream=True,
     )
 
     summary = ""
     for chunk in completion:
-        if chunk.choices[0].delta.content is not None:
-            summary += chunk.choices[0].delta.content
+        # Access text content from parts
+        if chunk.candidates[0].content.parts is not None:
+             for part in chunk.candidates[0].content.parts:
+                 summary += part.text
 
     return summary
 
@@ -61,9 +86,7 @@ async def root():
 @app.post("/summarize")
 async def summarize(req: SummarizeRequest):
     try:
-        return StreamingResponse(
-            stream_summary(req.text, max_tokens=req.max_tokens or 1024),
-            media_type="text/plain"
-        )
+        summary = await stream_summary(req.text, max_tokens=req.max_tokens or 1024)
+        return {"summary": summary} # Return as JSON
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
