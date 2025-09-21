@@ -1,92 +1,108 @@
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
-from dotenv import load_dotenv
-from typing import Optional
+import json
 import os
-import uvicorn # Import uvicorn
-import threading
-import asyncio
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import Optional
 
+# Best practice: use the google.generativeai library for Gemini
 import google.generativeai as genai
-# Used to securely store your API key
-from google.colab import userdata
 
-
-# Load environment variables
-load_dotenv()
-
-# Configure Gemini API
+# --- Configuration ---
+# It's much safer to load your API key from an environment variable
+# than to hardcode it in your script.
+# On your server, you would set: export GOOGLE_API_KEY="your_real_api_key"
 try:
-    # Access the API key from Google Colab secrets
-    GOOGLE_API_KEY = "AIzaSyCO3ZAadsBiMgYeP0DOfDYgy9IoSUDH9WQ";
+    # Attempt to get the key from environment variables
+    GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     if not GOOGLE_API_KEY:
-        raise ValueError("GOOGLE_API_KEY not found in Colab secrets.")
+        # Fallback for environments like Colab secrets or if you must hardcode (not recommended)
+        GOOGLE_API_KEY = "AIzaSyCO3ZAadsBiMgYeP0DOfDYgy9IoSUDH9WQ" # Replace with your actual key if needed
+    
     genai.configure(api_key=GOOGLE_API_KEY)
 except Exception as e:
     print(f"Error configuring Gemini API: {e}")
-    # Handle the error appropriately, e.g., exit or raise an exception
+    # In a real application, you might want to log this error and exit.
     exit()
 
+# Use a current, valid model name. 'gemini-1.5-flash-latest' is a great choice.
+MODEL = "gemini-1.5-flash-latest"
 
-MODEL = "gemini-2.0-flash" # Use an appropriate Gemini model
+# --- FastAPI App ---
+app = FastAPI(title="AI Summarizer API")
 
-# FastAPI app
-app = FastAPI(title="Notes + AI Summarizer API (Streaming)")
-
-# Request schema
+# Define the structure of the request body using Pydantic
+# The max_tokens field has been removed.
 class SummarizeRequest(BaseModel):
     text: str
-    max_tokens: Optional[int] = 1024
 
-
-def get_client():
-    # With the Gemini API, the client is not explicitly created like with OpenAI.
-    # The genai.configure(api_key=...) handles the setup.
-    # We will return the generative model directly.
+# --- API Logic ---
+def get_gemini_model():
+    """Initializes and returns the Gemini generative model."""
     return genai.GenerativeModel(MODEL)
 
-
-async def stream_summary(text: str, max_tokens: int = 1024) -> str:
+async def generate_summary_stream(text_to_summarize: str) -> str:
     """
-    Collects streamed summary from Gemini LLM and returns full text.
+    Generates a summary from the Gemini LLM using streaming.
+    The max_tokens value is now hardcoded here.
     """
-    model = get_client()
+    model = get_gemini_model()
+    
+    # The prompt for the model.
+    prompt = f"Please provide a concise summary of the following text:\n\n---\n\n{text_to_summarize}"
 
-    # Truncate text if longer than 1024 characters
-    truncated_text = text[:1024] if len(text) > 1024 else text
+    # Configure the generation
+    generation_config = genai.types.GenerationConfig(
+        temperature=0.7,
+        top_p=0.95,
+        max_output_tokens=1024, # Using a fixed default value
+    )
 
-    completion = model.generate_content(
-        contents=[
-            {"role": "user", "parts": [{"text": f"Summarize this:\n\n{truncated_text}"}]},
-        ],
-        generation_config={
-            "temperature": 0.6,
-            "top_p": 0.95,
-            "max_output_tokens": max_tokens, # Use max_output_tokens for Gemini
-        },
-        stream=True,
+    # Start the generation with streaming enabled
+    stream = model.generate_content(
+        prompt,
+        generation_config=generation_config,
+        stream=True
     )
 
     summary = ""
-    for chunk in completion:
-        # Access text content from parts
-        if chunk.candidates[0].content.parts is not None:
-             for part in chunk.candidates[0].content.parts:
-                 summary += part.text
+    try:
+        for chunk in stream:
+            # The .text attribute directly gives you the generated text in the chunk
+            if chunk.text:
+                summary += chunk.text
+    except Exception as e:
+        # Handle potential errors during streaming (e.g., safety blocks)
+        print(f"An error occurred during content generation: {e}")
+        # Depending on the error, you might get a partial summary.
+        # We'll return what we have, but you could also raise an HTTPException.
+        if not summary: # If no summary was generated at all
+             raise HTTPException(status_code=500, detail=f"Failed to generate summary: {e}") from e
 
     return summary
 
-
+# --- API Endpoints ---
 @app.get("/")
 async def root():
-    return {"status": "ok", "message": "Streaming Summarizer API is running"}
-
+    """Root endpoint to check if the API is running."""
+    return {"status": "ok", "message": "AI Summarizer API is running"}
 
 @app.post("/summarize")
 async def summarize(req: SummarizeRequest):
+    """
+    Endpoint to receive text and return a summary.
+    """
+    if not req.text:
+        raise HTTPException(status_code=400, detail="Text field cannot be empty.")
+        
     try:
-        summary = await stream_summary(req.text, max_tokens=req.max_tokens or 1024)
-        return {"summary": summary} # Return as JSON
+        # The call to the generator function no longer includes max_tokens.
+        summary = await generate_summary_stream(req.text)
+        return {"summary": summary}
+    except HTTPException as http_exc:
+        # Re-raise HTTP exceptions from the generator
+        raise http_exc
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        # Catch any other unexpected errors and return a 500 status code.
+        print(f"An internal server error occurred: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal server error occurred: {e}")
+
