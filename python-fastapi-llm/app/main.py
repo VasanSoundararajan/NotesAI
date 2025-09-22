@@ -16,7 +16,7 @@ try:
     GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
     if not GOOGLE_API_KEY:
         # Fallback for environments like Colab secrets or if you must hardcode (not recommended)
-        GOOGLE_API_KEY = "AIzaSyCO3ZAadsBiMgYeP0DOfDYgy9IoSUDH9WQ" # Replace with your actual key if needed
+        GOOGLE_API_KEY = l" # Replace with your actual key if needed
     
     genai.configure(api_key=GOOGLE_API_KEY)
 except Exception as e:
